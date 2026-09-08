@@ -1,0 +1,65 @@
+# Render Blueprint — deploys the API (from API/Dockerfile) and a
+# self-hosted, dockerized Postgres side by side, wired together over
+# Render's private networking.
+#
+# This is a starting point, not a guaranteed-correct file: Render's
+# Blueprint schema does evolve, and this hasn't been applied against a real
+# Render account. After importing it (Dashboard -> New -> Blueprint,
+# pointing at this repo), check the preview Render shows you before
+# applying, and fix up anything it flags.
+#
+# Manual step required after the first apply: several env vars below are
+# marked `sync: false`, meaning Render won't set a value for them — you set
+# it once in the dashboard. Specifically:
+#   - aqualog-postgres: POSTGRES_PASSWORD -> pick any strong password
+#   - aqualog-api: ConnectionStrings__DbConnection -> use the SAME password:
+#       Host=aqualog-postgres;Port=5432;Database=AquaLogDb;Username=aqualog;Password=<the password you just picked>
+#   - aqualog-api: JWT__Key -> a long random string (never reuse the dev
+#     value committed in API/appsettings.json for production)
+#   - aqualog-api: Cors__AllowedOrigins__0 -> your deployed Vercel URL,
+#     e.g. https://your-app.vercel.app (add more Cors__AllowedOrigins__1,
+#     __2, ... for additional origins, e.g. a custom domain)
+#
+# "aqualog-postgres" is a private service (pserv) — Render doesn't expose it
+# to the internet, only to other services in this same Blueprint, which can
+# reach it at the hostname "aqualog-postgres" on port 5432.
+
+services:
+  - type: pserv
+    name: aqualog-postgres
+    runtime: image
+    image:
+      url: docker.io/library/postgres:16-alpine
+    plan: starter
+    disk:
+      name: aqualog-postgres-data
+      mountPath: /var/lib/postgresql/data
+      sizeGB: 1
+    envVars:
+      - key: POSTGRES_USER
+        value: aqualog
+      - key: POSTGRES_DB
+        value: AquaLogDb
+      - key: PGDATA
+        value: /var/lib/postgresql/data/pgdata
+      - key: POSTGRES_PASSWORD
+        sync: false
+
+  - type: web
+    name: aqualog-api
+    runtime: docker
+    dockerfilePath: ./API/Dockerfile
+    dockerContext: ./API
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: ConnectionStrings__DbConnection
+        sync: false
+      - key: JWT__Key
+        sync: false
+      - key: JWT__Issuer
+        value: issuer.aqualog
+      - key: JWT__Audience
+        value: audience.aqualog
+      - key: Cors__AllowedOrigins__0
+        sync: false

@@ -2,6 +2,8 @@ using API;
 using API.Infrastructure.Persistence;
 using API.Models;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.EntityFrameworkCore;
 using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -27,6 +29,22 @@ if (app.Environment.IsDevelopment())
     });
 }
 
+// Render (and most PaaS hosts) terminate TLS at their edge and forward
+// plain HTTP to the container, tagging the original scheme via
+// X-Forwarded-Proto. Without this, UseHttpsRedirection() can't see that the
+// original request was already HTTPS and would send the client into a
+// redirect loop.
+var forwardedHeadersOptions = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+};
+// Render's edge proxy IP isn't fixed/known ahead of time, unlike the
+// default loopback-only trust list — clear it so forwarded headers from
+// the platform's proxy are actually honored.
+forwardedHeadersOptions.KnownIPNetworks.Clear();
+forwardedHeadersOptions.KnownProxies.Clear();
+app.UseForwardedHeaders(forwardedHeadersOptions);
+
 app.UseHttpsRedirection();
 
 app.UseCors("AdminPortal");
@@ -38,6 +56,9 @@ app.MapControllers();
 
 using (var scope = app.Services.CreateScope())
 {
+    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await dbContext.Database.MigrateAsync();
+
     var userManager = scope.ServiceProvider.GetRequiredService<UserManager<AppUser>>();
     var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
 

@@ -1,0 +1,8 @@
+# .NET build artifacts (API/)
+bin/
+obj/
+*.user
+.vs/
+
+# OS cruft
+.DS_Store
