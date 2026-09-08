@@ -4,10 +4,12 @@ import 'package:http/http.dart' as http;
 
 import 'token_store.dart';
 
-/// http://localhost works from the iOS Simulator (shares the host Mac's
-/// loopback). A physical device or Android emulator needs a real host
-/// address instead (Android emulator: 10.0.2.2).
-const String apiBaseUrl = 'http://localhost:5260/api';
+/// Points at the deployed Render API. For local development against a
+/// locally-running API instead, temporarily swap this back to
+/// 'http://localhost:5260/api' (iOS Simulator only — a physical device or
+/// Android emulator needs a real host address instead, e.g. 10.0.2.2 for
+/// the Android emulator).
+const String apiBaseUrl = 'https://aqualog-api.onrender.com/api';
 
 final TokenStore _tokenStore = TokenStore();
 final http.Client _httpClient = http.Client();

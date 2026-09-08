@@ -30,9 +30,23 @@ namespace API
             {
                 options.AddPolicy("AdminPortal", policy =>
                 {
-                    policy.WithOrigins(allowedOrigins)
-                        .AllowAnyHeader()
-                        .AllowAnyMethod();
+                    // WithOrigins() treats "*" as a literal origin string to
+                    // match, not a wildcard — it would never match a real
+                    // browser Origin header, silently blocking everything.
+                    // AllowAnyOrigin() is the actual wildcard. Safe to combine
+                    // with AllowAnyHeader/AllowAnyMethod here since this API
+                    // never uses AllowCredentials (auth is a Bearer token in
+                    // the Authorization header, not cookies).
+                    if (allowedOrigins.Contains("*"))
+                    {
+                        policy.AllowAnyOrigin();
+                    }
+                    else
+                    {
+                        policy.WithOrigins(allowedOrigins);
+                    }
+
+                    policy.AllowAnyHeader().AllowAnyMethod();
                 });
             });
 
