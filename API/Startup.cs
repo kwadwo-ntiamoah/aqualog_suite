@@ -1,5 +1,5 @@
+using API.Infrastructure.Identity;
 using API.Infrastructure.Persistence;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using API.Models;
@@ -13,7 +13,7 @@ namespace API
     {
         public static IServiceCollection RegisterStartup(this IServiceCollection services, IConfiguration config)
         {
-            services.AddPersistence(config);
+            services.AddFirestore(config);
             services.AddJwtConfig(config);
             services.AddIdentityConfig();
             services.AddCorsConfig(config);
@@ -35,14 +35,6 @@ namespace API
                         .AllowAnyMethod();
                 });
             });
-
-            return services;
-        }
-
-        private static IServiceCollection AddPersistence(this IServiceCollection services, IConfiguration config)
-        {
-            var connectionString = config.GetConnectionString("DbConnection");
-            services.AddDbContext<AppDbContext>(options => options.UseNpgsql(connectionString));
 
             return services;
         }
@@ -73,11 +65,18 @@ namespace API
             return services;
         }
 
+        // No EF Core store here — Firestore has no EF Core provider, so
+        // Identity is backed by the hand-written FirestoreUserStore/
+        // FirestoreRoleStore instead (see Infrastructure/Identity/). Those
+        // implement only the store interfaces this app's UserManager usage
+        // actually needs (password, role, security-stamp — no email/claims/
+        // lockout, since AuthService never touches those).
         private static IServiceCollection AddIdentityConfig(this IServiceCollection services)
         {
             services.AddIdentityCore<AppUser>()
                 .AddRoles<IdentityRole>()
-                .AddEntityFrameworkStores<AppDbContext>()
+                .AddUserStore<FirestoreUserStore>()
+                .AddRoleStore<FirestoreRoleStore>()
                 .AddDefaultTokenProviders();
 
             return services;

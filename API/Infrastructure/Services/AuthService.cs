@@ -1,16 +1,19 @@
-using System.Linq;
-using API.Infrastructure.Persistence;
+using API.Infrastructure.Identity;
 using API.Models;
 using ErrorOr;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
 using static API.Infrastructure.Services.Common;
 
 namespace API.Infrastructure.Services
 {
-    public class AuthService(UserManager<AppUser> userManager, TokenService tokenService, AppDbContext context)
+    public class AuthService(UserManager<AppUser> userManager, TokenService tokenService, FirestoreDb db)
     {
+        private CollectionReference Users => db.Collection("users");
+        private CollectionReference Shops => db.Collection("shops");
+        private CollectionReference PasswordResetRequests => db.Collection("passwordResetRequests");
+
         public async Task<ErrorOr<Token>> GetTokenAsync(string username, string password)
         {
             try
@@ -42,12 +45,10 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var user = await userManager.Users
-                    .Include(u => u.Shop)
-                    .FirstOrDefaultAsync(u => u.Id == userId);
-
+                var user = await userManager.FindByIdAsync(userId);
                 if (user is null) return Error.Unauthorized(description: "Not authorized to perform this action");
 
+                var shopName = await GetShopNameAsync(user.ShopId);
                 var roles = await userManager.GetRolesAsync(user);
 
                 return new MeResponse
@@ -56,7 +57,7 @@ namespace API.Infrastructure.Services
                     Username = user.UserName!,
                     Fullname = user.Fullname,
                     ShopId = user.ShopId,
-                    ShopName = user.Shop?.DisplayName,
+                    ShopName = shopName,
                     Role = roles.FirstOrDefault() ?? "attendant"
                 };
             }
@@ -132,24 +133,20 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var users = await userManager.Users
-                    .Include(u => u.Shop)
-                    .OrderBy(u => u.Fullname)
-                    .ToListAsync();
+                var snapshot = await Users.GetSnapshotAsync();
+                var users = snapshot.Documents.Select(FirestoreUserStore.FromDocument).OrderBy(u => u.Fullname).ToList();
 
-                var result = new List<UserSummaryDto>();
-                foreach (var user in users)
+                var shopIds = users.Where(u => u.ShopId.HasValue).Select(u => u.ShopId!.Value).Distinct().ToList();
+                var shopNames = await GetShopNamesAsync(shopIds);
+
+                var result = users.Select(user => new UserSummaryDto
                 {
-                    var roles = await userManager.GetRolesAsync(user);
-                    result.Add(new UserSummaryDto
-                    {
-                        Id = user.Id,
-                        Username = user.UserName!,
-                        Fullname = user.Fullname,
-                        Role = roles.FirstOrDefault() ?? "attendant",
-                        ShopName = user.Shop?.DisplayName
-                    });
-                }
+                    Id = user.Id,
+                    Username = user.UserName!,
+                    Fullname = user.Fullname,
+                    Role = user.Roles.FirstOrDefault() ?? "attendant",
+                    ShopName = user.ShopId.HasValue ? shopNames.GetValueOrDefault(user.ShopId.Value) : null
+                }).ToList();
 
                 return result;
             }
@@ -210,14 +207,15 @@ namespace API.Infrastructure.Services
                 var user = await userManager.FindByNameAsync(username);
                 if (user == null) return Error.NotFound(description: "No account found with that User ID");
 
-                await context.PasswordResetRequests.AddAsync(new PasswordResetRequest
+                var id = Guid.NewGuid();
+                await PasswordResetRequests.Document(id.ToString()).SetAsync(new Dictionary<string, object?>
                 {
-                    UserId = user.Id,
-                    IsApproved = null,
-                    RequestedAt = DateTime.UtcNow
+                    ["UserId"] = user.Id,
+                    ["IsApproved"] = null,
+                    ["RequestedAt"] = DateTime.UtcNow,
+                    ["UpdatedAt"] = DateTime.UtcNow,
                 });
 
-                await context.SaveChangesAsync();
                 return new SuccessResponse { Message = "Your admin has been notified" };
             }
             catch (Exception ex)
@@ -230,19 +228,25 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var requests = await context.PasswordResetRequests
-                    .Where(r => r.IsApproved == null)
-                    .OrderBy(r => r.RequestedAt)
-                    .Select(r => new PendingPasswordResetDto
-                    {
-                        Id = r.Id,
-                        Username = r.User != null ? r.User.UserName! : "",
-                        FullName = r.User != null ? r.User.Fullname : "",
-                        RequestedAt = r.RequestedAt
-                    })
-                    .ToListAsync();
+                var snapshot = await PasswordResetRequests.WhereEqualTo("IsApproved", null).GetSnapshotAsync();
+                var requests = snapshot.Documents.ToList();
 
-                return requests;
+                var result = new List<PendingPasswordResetDto>();
+                foreach (var request in requests)
+                {
+                    var userId = request.GetValue<string>("UserId");
+                    var userSnapshot = await Users.Document(userId).GetSnapshotAsync();
+
+                    result.Add(new PendingPasswordResetDto
+                    {
+                        Id = Guid.Parse(request.Id),
+                        Username = userSnapshot.Exists ? userSnapshot.GetValue<string?>("UserName") ?? "" : "",
+                        FullName = userSnapshot.Exists ? userSnapshot.GetValue<string?>("Fullname") ?? "" : "",
+                        RequestedAt = request.GetValue<DateTime>("RequestedAt")
+                    });
+                }
+
+                return result.OrderBy(r => r.RequestedAt).ToList();
             }
             catch (Exception ex)
             {
@@ -254,19 +258,23 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var request = await context.PasswordResetRequests.FindAsync(id);
-                if (request is null) return Error.NotFound(description: "Request not found");
+                var requestRef = PasswordResetRequests.Document(id.ToString());
+                var request = await requestRef.GetSnapshotAsync();
+                if (!request.Exists) return Error.NotFound(description: "Request not found");
 
-                var user = await userManager.FindByIdAsync(request.UserId);
+                var userId = request.GetValue<string>("UserId");
+                var user = await userManager.FindByIdAsync(userId);
                 if (user is null) return Error.NotFound(description: "User not found");
 
                 var resetToken = await userManager.GeneratePasswordResetTokenAsync(user);
                 var result = await userManager.ResetPasswordAsync(user, resetToken, newPassword);
                 if (!result.Succeeded) return Error.Failure(description: "Could not set the new password");
 
-                request.IsApproved = true;
-                request.UpdatedAt = DateTime.UtcNow;
-                await context.SaveChangesAsync();
+                await requestRef.UpdateAsync(new Dictionary<string, object>
+                {
+                    ["IsApproved"] = true,
+                    ["UpdatedAt"] = DateTime.UtcNow,
+                });
 
                 return new SuccessResponse { Message = "Password reset resolved" };
             }
@@ -274,6 +282,32 @@ namespace API.Infrastructure.Services
             {
                 return Error.Failure(description: ex.Message);
             }
+        }
+
+        private async Task<string?> GetShopNameAsync(Guid? shopId)
+        {
+            if (!shopId.HasValue) return null;
+
+            var shopSnapshot = await Shops.Document(shopId.Value.ToString()).GetSnapshotAsync();
+            return shopSnapshot.Exists ? shopSnapshot.GetValue<string?>("DisplayName") : null;
+        }
+
+        private async Task<Dictionary<Guid, string>> GetShopNamesAsync(List<Guid> shopIds)
+        {
+            var result = new Dictionary<Guid, string>();
+            if (shopIds.Count == 0) return result;
+
+            foreach (var chunk in shopIds.Chunk(30))
+            {
+                var refs = chunk.Select(id => Shops.Document(id.ToString())).ToList();
+                var snapshots = await db.GetAllSnapshotsAsync(refs);
+                foreach (var snapshot in snapshots)
+                {
+                    if (snapshot.Exists) result[Guid.Parse(snapshot.Id)] = snapshot.GetValue<string?>("DisplayName") ?? "";
+                }
+            }
+
+            return result;
         }
     }
 

@@ -1,13 +1,13 @@
-using API.Infrastructure.Persistence;
-using API.Models;
 using ErrorOr;
-using Microsoft.EntityFrameworkCore;
+using Google.Cloud.Firestore;
 using Newtonsoft.Json;
 
 namespace API.Infrastructure.Services
 {
-    public class AnalyticsService(AppDbContext context)
+    public class AnalyticsService(FirestoreDb db)
     {
+        private CollectionReference Transactions => db.Collection("transactions");
+
         public async Task<ErrorOr<AnalyticsOverviewDto>> GetOverviewAsync()
         {
             try
@@ -15,9 +15,19 @@ namespace API.Infrastructure.Services
                 var today = DateTime.UtcNow.Date;
                 var sevenDaysAgo = today.AddDays(-6);
 
-                var recentTransactions = await context.Transactions
-                    .Where(t => t.DateCreated >= sevenDaysAgo)
-                    .ToListAsync();
+                var snapshot = await Transactions.WhereGreaterThanOrEqualTo("DateCreated", sevenDaysAgo).GetSnapshotAsync();
+
+                var recentTransactions = snapshot.Documents
+                    .Select(d => new
+                    {
+                        DateCreated = d.GetValue<DateTime>("DateCreated"),
+                        TotalAmount = decimal.Parse(d.GetValue<string>("TotalAmount")),
+                        PaymentMethod = d.GetValue<string>("PaymentMethod"),
+                        Container = d.GetValue<string>("Container"),
+                        VehicleNo = d.GetValue<string?>("VehicleNo"),
+                        Quantity = d.GetValue<int>("Quantity"),
+                    })
+                    .ToList();
 
                 var revenueByDay = new List<DailyRevenueDto>();
                 for (var day = sevenDaysAgo; day <= today; day = day.AddDays(1))
@@ -33,13 +43,13 @@ namespace API.Infrastructure.Services
                 var cashPct = totalRevenue > 0 ? Math.Round(cashRevenue / totalRevenue * 100, 1) : 0;
                 var momoPct = totalRevenue > 0 ? Math.Round(momoRevenue / totalRevenue * 100, 1) : 0;
 
-                var topVehicles = await context.Transactions
-                    .Where(t => t.Container == ContainerType.TANK && t.VehicleNo != null)
+                var topVehicles = recentTransactions
+                    .Where(t => t.Container == "TANK" && t.VehicleNo != null)
                     .GroupBy(t => t.VehicleNo)
                     .Select(g => new TopVehicleDto { VehicleNo = g.Key!, TanksSold = g.Sum(t => t.Quantity) })
                     .OrderByDescending(v => v.TanksSold)
                     .Take(5)
-                    .ToListAsync();
+                    .ToList();
 
                 return new AnalyticsOverviewDto
                 {

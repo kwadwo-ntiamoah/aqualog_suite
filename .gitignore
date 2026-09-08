@@ -4,5 +4,8 @@ obj/
 *.user
 .vs/
 
+# local env vars (Firestore project/credentials for docker-compose)
+.env
+
 # OS cruft
 .DS_Store

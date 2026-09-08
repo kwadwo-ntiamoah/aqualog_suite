@@ -2,41 +2,44 @@ using System.Text;
 using ClosedXML.Excel;
 using ErrorOr;
 using API.Controllers;
-using API.Infrastructure.Persistence;
 using API.Models;
-using Microsoft.EntityFrameworkCore;
+using Google.Cloud.Firestore;
 using Newtonsoft.Json;
 using static API.Infrastructure.Services.Common;
 
 namespace API.Infrastructure.Services
 {
-    public class TransactionService(AppDbContext context)
+    public class TransactionService(FirestoreDb db)
     {
+        private CollectionReference Transactions => db.Collection("transactions");
+        private CollectionReference Users => db.Collection("users");
+
         public async Task<ErrorOr<SuccessResponse>> AddTxnAsync(SellDto model, string processedByUserId)
         {
             try
             {
-                var user = await context.Users.FindAsync(processedByUserId);
-                if (user?.ShopId is null) return Error.Validation(description: "Your account isn't assigned to a shop yet");
+                var userSnapshot = await Users.Document(processedByUserId).GetSnapshotAsync();
+                var shopId = userSnapshot.Exists ? userSnapshot.GetValue<string?>("ShopId") : null;
+                if (string.IsNullOrEmpty(shopId)) return Error.Validation(description: "Your account isn't assigned to a shop yet");
 
-                await context.Transactions.AddAsync(new Transaction
+                var id = Guid.NewGuid();
+                var totalAmount = model.UnitPrice * model.Quantity;
+
+                await Transactions.Document(id.ToString()).SetAsync(new Dictionary<string, object?>
                 {
-                    Container = model.ContainerType == "TANK" ? ContainerType.TANK : ContainerType.BUCKET,
-                    Buyer = model.Buyer,
-                    Quantity = model.Quantity,
-                    UnitPrice = model.UnitPrice,
-                    TotalAmount = model.UnitPrice * model.Quantity,
-                    ShopId = user.ShopId.Value,
-                    ProcessedByUserId = processedByUserId,
-                    PaymentMethod = model.PaymentMethod,
-                    VehicleNo = model.VehicleNo,
-                    DateCreated = DateTime.UtcNow
+                    ["Container"] = (model.ContainerType == "TANK" ? ContainerType.TANK : ContainerType.BUCKET).ToString(),
+                    ["Buyer"] = model.Buyer,
+                    ["Quantity"] = model.Quantity,
+                    ["UnitPrice"] = ((decimal)model.UnitPrice).ToString(),
+                    ["TotalAmount"] = ((decimal)totalAmount).ToString(),
+                    ["ShopId"] = shopId,
+                    ["ProcessedByUserId"] = processedByUserId,
+                    ["PaymentMethod"] = model.PaymentMethod,
+                    ["VehicleNo"] = model.VehicleNo,
+                    ["DateCreated"] = DateTime.UtcNow,
                 });
 
-                var rowsAffected = await context.SaveChangesAsync();
-                if (rowsAffected > 0) return new SuccessResponse { Message = "Transaction recorded successfully" };
-
-                return Error.Failure(description: "Error adding transaction");
+                return new SuccessResponse { Message = "Transaction recorded successfully" };
             }
             catch (Exception ex)
             {
@@ -51,19 +54,18 @@ namespace API.Infrastructure.Services
                 var today = DateTime.UtcNow.Date;
                 var tomorrow = today.AddDays(1);
 
-                var totalRecords = await context.Transactions.CountAsync();
-                var totalQuantity = await context.Transactions.SumAsync(t => (int?)t.Quantity) ?? 0;
-                var totalCollected = await context.Transactions.SumAsync(t => (decimal?)t.TotalAmount) ?? 0;
-                var collectedToday = await context.Transactions
-                    .Where(t => t.DateCreated >= today && t.DateCreated < tomorrow)
-                    .SumAsync(t => (decimal?)t.TotalAmount) ?? 0;
+                var all = await Transactions.GetSnapshotAsync();
+                var todays = await Transactions
+                    .WhereGreaterThanOrEqualTo("DateCreated", today)
+                    .WhereLessThan("DateCreated", tomorrow)
+                    .GetSnapshotAsync();
 
                 return new TransactionsSummaryDto
                 {
-                    TotalRecords = totalRecords,
-                    TotalQuantity = totalQuantity,
-                    TotalCollected = totalCollected,
-                    CollectedToday = collectedToday
+                    TotalRecords = all.Count,
+                    TotalQuantity = all.Documents.Sum(d => d.GetValue<int>("Quantity")),
+                    TotalCollected = all.Documents.Sum(d => decimal.Parse(d.GetValue<string>("TotalAmount"))),
+                    CollectedToday = todays.Documents.Sum(d => decimal.Parse(d.GetValue<string>("TotalAmount")))
                 };
             }
             catch (Exception ex)
@@ -76,36 +78,37 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var query = context.Transactions.AsQueryable();
+                Query query = Transactions;
 
                 if (date.HasValue)
                 {
-                    // Query-string DateTime binding produces Kind=Unspecified, but the
-                    // DateCreated column is timestamptz — Npgsql refuses to compare
-                    // against an Unspecified-kind value, so it must be marked UTC first.
+                    // DateCreated is stored in UTC; query-string DateTime binding
+                    // produces Kind=Unspecified, so mark it UTC before comparing.
                     var day = DateTime.SpecifyKind(date.Value.Date, DateTimeKind.Utc);
-                    query = query.Where(t => t.DateCreated >= day && t.DateCreated < day.AddDays(1));
+                    query = query.WhereGreaterThanOrEqualTo("DateCreated", day).WhereLessThan("DateCreated", day.AddDays(1));
                 }
 
                 if (!string.IsNullOrWhiteSpace(paymentMethod))
                 {
-                    query = query.Where(t => t.PaymentMethod == paymentMethod);
+                    query = query.WhereEqualTo("PaymentMethod", paymentMethod);
                 }
 
-                var records = await query
-                    .OrderByDescending(t => t.DateCreated)
-                    .Select(t => new TransactionRecordDto
+                var snapshot = await query.GetSnapshotAsync();
+
+                var records = snapshot.Documents
+                    .Select(d => new TransactionRecordDto
                     {
-                        Id = t.Id,
-                        Buyer = t.Buyer ?? "",
-                        VehicleNo = t.VehicleNo,
-                        PaymentMethod = t.PaymentMethod,
-                        TotalAmount = t.TotalAmount,
-                        ContainerType = t.Container.ToString(),
-                        Quantity = t.Quantity,
-                        DateCreated = t.DateCreated
+                        Id = Guid.Parse(d.Id),
+                        Buyer = d.GetValue<string?>("Buyer") ?? "",
+                        VehicleNo = d.GetValue<string?>("VehicleNo"),
+                        PaymentMethod = d.GetValue<string>("PaymentMethod"),
+                        TotalAmount = decimal.Parse(d.GetValue<string>("TotalAmount")),
+                        ContainerType = d.GetValue<string>("Container"),
+                        Quantity = d.GetValue<int>("Quantity"),
+                        DateCreated = d.GetValue<DateTime>("DateCreated")
                     })
-                    .ToListAsync();
+                    .OrderByDescending(r => r.DateCreated)
+                    .ToList();
 
                 return records;
             }

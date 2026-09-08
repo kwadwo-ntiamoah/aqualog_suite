@@ -1,28 +1,29 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using API.Controllers;
-using API.Infrastructure.Persistence;
 using API.Models;
 using ErrorOr;
-using Microsoft.EntityFrameworkCore;
+using Google.Cloud.Firestore;
 using Newtonsoft.Json;
 using static API.Infrastructure.Services.Common;
 
 namespace API.Infrastructure.Services
 {
-    public class ShopService(AppDbContext context)
+    public class ShopService(FirestoreDb db)
     {
+        private CollectionReference Shops => db.Collection("shops");
+        private CollectionReference Balances => db.Collection("electricityBalances");
+        private CollectionReference Transactions => db.Collection("transactions");
+        private CollectionReference Users => db.Collection("users");
+
         public async Task<ErrorOr<List<ShopSummaryDto>>> GetShopsAsync()
         {
             try
             {
-                var shops = await context.Shops
-                    .Where(s => s.IsActive)
-                    .OrderBy(s => s.DisplayName)
-                    .Select(s => new ShopSummaryDto { Id = s.Id, Name = s.DisplayName })
-                    .ToListAsync();
+                var snapshot = await Shops.WhereEqualTo("IsActive", true).GetSnapshotAsync();
+
+                var shops = snapshot.Documents
+                    .Select(d => new ShopSummaryDto { Id = Guid.Parse(d.Id), Name = d.GetValue<string>("DisplayName") })
+                    .OrderBy(s => s.Name)
+                    .ToList();
 
                 return shops;
             }
@@ -36,17 +37,16 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                await context.Shops.AddAsync(new Shop
+                var id = Guid.NewGuid();
+                await Shops.Document(id.ToString()).SetAsync(new Dictionary<string, object>
                 {
-                    CreatedAt = DateTime.UtcNow,
-                    DisplayName = model.Name,
-                    IsActive = true
+                    ["DisplayName"] = model.Name,
+                    ["IsActive"] = true,
+                    ["CreatedAt"] = DateTime.UtcNow,
+                    ["UpdatedAt"] = DateTime.UtcNow,
                 });
 
-                var rowsAffected = await context.SaveChangesAsync();
-                if (rowsAffected > 0) return new SuccessResponse { Message = "Driver added successfully" };
-
-                return Error.Failure(description: "Error adding driver");
+                return new SuccessResponse { Message = "Driver added successfully" };
             }
             catch (Exception ex)
             {
@@ -58,21 +58,19 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var shop = await context.Shops.FindAsync(shopId);
-                if (shop == null) return Error.NotFound(description: "Shop not found");
+                var shopSnapshot = await Shops.Document(shopId.ToString()).GetSnapshotAsync();
+                if (!shopSnapshot.Exists) return Error.NotFound(description: "Shop not found");
 
-                await context.ElectricityBalances.AddAsync(new ElectricityBalance
+                var id = Guid.NewGuid();
+                await Balances.Document(id.ToString()).SetAsync(new Dictionary<string, object>
                 {
-                    ShopId = shopId,
-                    Balance = model.Balance,
-                    DateRecorded = DateTime.UtcNow,
-                    UserId = userId
+                    ["ShopId"] = shopId.ToString(),
+                    ["Balance"] = model.Balance,
+                    ["DateRecorded"] = DateTime.UtcNow,
+                    ["UserId"] = userId,
                 });
 
-                var rowsAffected = await context.SaveChangesAsync();
-                if (rowsAffected > 0) return new SuccessResponse { Message = "Balance added successfully" };
-
-                return Error.Failure(description: "Error adding driver");
+                return new SuccessResponse { Message = "Balance added successfully" };
             }
             catch (Exception ex)
             {
@@ -84,19 +82,26 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var latest = await context.ElectricityBalances
-                    .Where(b => b.ShopId == shopId)
-                    .OrderByDescending(b => b.DateRecorded)
-                    .Select(b => new ElectricityBalanceDto
-                    {
-                        HasRecord = true,
-                        Balance = b.Balance,
-                        DateRecorded = b.DateRecorded,
-                        RecordedByName = b.User != null ? b.User.Fullname : null
-                    })
-                    .FirstOrDefaultAsync();
+                var snapshot = await Balances
+                    .WhereEqualTo("ShopId", shopId.ToString())
+                    .OrderByDescending("DateRecorded")
+                    .Limit(1)
+                    .GetSnapshotAsync();
 
-                return latest ?? new ElectricityBalanceDto { HasRecord = false };
+                var latest = snapshot.Documents.FirstOrDefault();
+                if (latest is null) return new ElectricityBalanceDto { HasRecord = false };
+
+                var userId = latest.GetValue<string>("UserId");
+                var userSnapshot = await Users.Document(userId).GetSnapshotAsync();
+                var recordedByName = userSnapshot.Exists ? userSnapshot.GetValue<string?>("Fullname") : null;
+
+                return new ElectricityBalanceDto
+                {
+                    HasRecord = true,
+                    Balance = latest.GetValue<int>("Balance"),
+                    DateRecorded = latest.GetValue<DateTime>("DateRecorded"),
+                    RecordedByName = recordedByName
+                };
             }
             catch (Exception ex)
             {
@@ -111,14 +116,18 @@ namespace API.Infrastructure.Services
                 var today = DateTime.UtcNow.Date;
                 var tomorrow = today.AddDays(1);
 
-                var todaysTransactions = await context.Transactions
-                    .Where(t => t.ShopId == shopId && t.DateCreated >= today && t.DateCreated < tomorrow)
-                    .ToListAsync();
+                var snapshot = await Transactions
+                    .WhereEqualTo("ShopId", shopId.ToString())
+                    .WhereGreaterThanOrEqualTo("DateCreated", today)
+                    .WhereLessThan("DateCreated", tomorrow)
+                    .GetSnapshotAsync();
+
+                var totalAmount = snapshot.Documents.Sum(d => decimal.Parse(d.GetValue<string>("TotalAmount")));
 
                 return new ShopSummaryStatsDto
                 {
-                    SalesToday = todaysTransactions.Count,
-                    CollectedToday = todaysTransactions.Sum(t => t.TotalAmount)
+                    SalesToday = snapshot.Count,
+                    CollectedToday = totalAmount
                 };
             }
             catch (Exception ex)

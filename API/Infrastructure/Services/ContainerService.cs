@@ -1,25 +1,24 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using API.Controllers;
-using API.Infrastructure.Persistence;
 using API.Models;
 using ErrorOr;
-using Microsoft.EntityFrameworkCore;
+using Google.Cloud.Firestore;
 using Newtonsoft.Json;
 using static API.Infrastructure.Services.Common;
 
 namespace API.Infrastructure.Services
 {
-    public class ContainerService(AppDbContext context)
+    public class ContainerService(FirestoreDb db)
     {
+        private CollectionReference Containers => db.Collection("containers");
+
         public async Task<ErrorOr<List<ContainerSummaryDto>>> GetContainersAsync()
         {
             try
             {
-                var containers = await context.Containers
-                    .Where(c => c.IsActive)
+                var snapshot = await Containers.WhereEqualTo("IsActive", true).GetSnapshotAsync();
+
+                var containers = snapshot.Documents
+                    .Select(FromDocument)
                     .OrderByDescending(c => c.CreatedDate)
                     .Select(c => new ContainerSummaryDto
                     {
@@ -28,7 +27,7 @@ namespace API.Infrastructure.Services
                         DisplayName = c.DisplayName,
                         UnitPrice = c.UnitPrice
                     })
-                    .ToListAsync();
+                    .ToList();
 
                 return containers;
             }
@@ -42,18 +41,18 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                await context.Containers.AddAsync(new Container
+                var container = new Container
                 {
+                    Id = Guid.NewGuid(),
                     CreatedDate = DateTime.UtcNow,
                     DisplayName = model.DisplayName,
                     Type = model.Type,
-                    UnitPrice = model.UnitPrice
-                });
+                    UnitPrice = model.UnitPrice,
+                    IsActive = true
+                };
 
-                var rowsAffected = await context.SaveChangesAsync();
-                if (rowsAffected > 0) return new SuccessResponse { Message = "Container added successfully" };
-
-                return Error.Failure(description: "Error adding container");
+                await Containers.Document(container.Id.ToString()).SetAsync(ToDocument(container));
+                return new SuccessResponse { Message = "Container added successfully" };
             }
             catch (Exception ex)
             {
@@ -65,15 +64,14 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var container = await context.Containers.FindAsync(containerId);
-                if (container is null) return Error.NotFound(description: "Container not found");
+                var docRef = Containers.Document(containerId.ToString());
+                var snapshot = await docRef.GetSnapshotAsync();
+                if (!snapshot.Exists) return Error.NotFound(description: "Container not found");
 
-                container.IsActive = !container.IsActive;
+                var isActive = snapshot.GetValue<bool>("IsActive");
+                await docRef.UpdateAsync("IsActive", !isActive);
 
-                var rowsAffected = await context.SaveChangesAsync();
-                if (rowsAffected > 0) return new SuccessResponse { Message = "Container updated successfully" };
-
-                return Error.Failure(description: "Error adding container");
+                return new SuccessResponse { Message = "Container updated successfully" };
             }
             catch (Exception ex)
             {
@@ -85,16 +83,11 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var container = await context.Containers.FindAsync(containerId);
-                if (container is null) return Error.NotFound(description: "Container not found");
+                var docRef = Containers.Document(containerId.ToString());
+                var snapshot = await docRef.GetSnapshotAsync();
+                if (!snapshot.Exists) return Error.NotFound(description: "Container not found");
 
-                container.UnitPrice = model.UnitPrice;
-
-                // Setting the price to the value it already has is a legitimate
-                // no-op — SaveChangesAsync correctly reports 0 rows affected in
-                // that case, so success can't hinge on rowsAffected here like the
-                // add/create methods above do.
-                await context.SaveChangesAsync();
+                await docRef.UpdateAsync("UnitPrice", model.UnitPrice.ToString());
                 return new SuccessResponse { Message = "Container updated successfully" };
             }
             catch (Exception ex)
@@ -102,6 +95,25 @@ namespace API.Infrastructure.Services
                 return Error.Failure(description: ex.Message);
             }
         }
+
+        private static Container FromDocument(DocumentSnapshot snapshot) => new()
+        {
+            Id = Guid.Parse(snapshot.Id),
+            UnitPrice = decimal.Parse(snapshot.GetValue<string>("UnitPrice")),
+            Type = Enum.Parse<ContainerType>(snapshot.GetValue<string>("Type")),
+            DisplayName = snapshot.GetValue<string>("DisplayName"),
+            CreatedDate = snapshot.GetValue<DateTime>("CreatedDate"),
+            IsActive = snapshot.GetValue<bool>("IsActive"),
+        };
+
+        private static Dictionary<string, object> ToDocument(Container container) => new()
+        {
+            ["UnitPrice"] = container.UnitPrice.ToString(),
+            ["Type"] = container.Type.ToString(),
+            ["DisplayName"] = container.DisplayName,
+            ["CreatedDate"] = container.CreatedDate,
+            ["IsActive"] = container.IsActive,
+        };
     }
 
     public class ContainerSummaryDto

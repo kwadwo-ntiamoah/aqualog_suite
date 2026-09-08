@@ -1,0 +1,28 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "transactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ShopId", "order": "ASCENDING" },
+        { "fieldPath": "DateCreated", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "transactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "PaymentMethod", "order": "ASCENDING" },
+        { "fieldPath": "DateCreated", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "electricityBalances",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ShopId", "order": "ASCENDING" },
+        { "fieldPath": "DateRecorded", "order": "DESCENDING" }
+      ]
+    }
+  ]
+}

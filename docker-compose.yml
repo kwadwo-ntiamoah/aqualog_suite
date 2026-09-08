@@ -1,35 +1,18 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: AquaLogDb
-    volumes:
-      - aqualog_pg_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   api:
     build:
       context: ./API
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       PORT: 8080
-      ConnectionStrings__DbConnection: "Host=postgres;Port=5432;Database=AquaLogDb;Username=postgres;Password=postgres"
+      # Real Firestore project + service account — same two values Render
+      # needs (see render.yaml). Put them in a local .env file (gitignored)
+      # rather than editing this file, e.g.:
+      #   FIRESTORE_PROJECT_ID=your-dev-project
+      #   FIRESTORE_CREDENTIALS_JSON={"type":"service_account",...}
+      Firestore__ProjectId: "${FIRESTORE_PROJECT_ID}"
+      Firestore__CredentialsJson: "${FIRESTORE_CREDENTIALS_JSON}"
       Cors__AllowedOrigins__0: "http://localhost:3000"
     ports:
       - "5260:8080"
-
-volumes:
-  aqualog_pg_data:

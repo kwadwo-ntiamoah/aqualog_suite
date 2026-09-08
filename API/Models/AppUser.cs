@@ -10,6 +10,12 @@ namespace API.Models
     {
         public string Fullname {get; set;} = null!;
         public Guid? ShopId {get; set;}
-        public Shop? Shop {get; set;}
+
+        // Stored directly on the user's Firestore document as an array field
+        // (queried via WhereArrayContains for GetUsersInRoleAsync) rather than
+        // a separate join collection — this app only ever assigns a user
+        // exactly one role, so a normalized many-to-many join table would be
+        // pure overhead here.
+        public List<string> Roles { get; set; } = [];
     }
 }

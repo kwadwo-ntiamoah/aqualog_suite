@@ -1,37 +1,37 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using API.Controllers;
-using API.Infrastructure.Persistence;
 using API.Models;
 using ClosedXML.Excel;
 using ErrorOr;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
 using static API.Infrastructure.Services.Common;
 
 namespace API.Infrastructure.Services
 {
-    public class DriverService(AppDbContext context)
+    public class DriverService(FirestoreDb db)
     {
+        private CollectionReference Drivers => db.Collection("drivers");
+        private CollectionReference DriverRequests => db.Collection("addDriverRequests");
+        private CollectionReference Users => db.Collection("users");
+
         public async Task<ErrorOr<List<DriverSummaryDto>>> GetDriversAsync()
         {
             try
             {
-                var drivers = await context.Drivers
-                    .Where(d => d.IsActive)
-                    .OrderBy(d => d.Name)
+                var snapshot = await Drivers.WhereEqualTo("IsActive", true).GetSnapshotAsync();
+
+                var drivers = snapshot.Documents
                     .Select(d => new DriverSummaryDto
                     {
-                        Id = d.Id,
-                        Name = d.Name,
-                        RegNo = d.VehicleNo,
-                        Contact = d.Contact,
-                        TanksInTruck = d.TanksInTruck
+                        Id = Guid.Parse(d.Id),
+                        Name = d.GetValue<string>("Name"),
+                        RegNo = d.GetValue<string>("VehicleNo"),
+                        Contact = d.GetValue<string>("Contact"),
+                        TanksInTruck = d.GetValue<int>("TanksInTruck")
                     })
-                    .ToListAsync();
+                    .OrderBy(d => d.Name)
+                    .ToList();
 
                 return drivers;
             }
@@ -45,13 +45,16 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var driver = await context.Drivers.FindAsync(id);
-                if (driver is null) return Error.NotFound(description: "Vehicle not found");
+                var docRef = Drivers.Document(id.ToString());
+                var snapshot = await docRef.GetSnapshotAsync();
+                if (!snapshot.Exists) return Error.NotFound(description: "Vehicle not found");
 
-                driver.TanksInTruck = tanksInTruck;
-                driver.DateUpdated = DateTime.UtcNow;
+                await docRef.UpdateAsync(new Dictionary<string, object>
+                {
+                    ["TanksInTruck"] = tanksInTruck,
+                    ["DateUpdated"] = DateTime.UtcNow,
+                });
 
-                await context.SaveChangesAsync();
                 return new SuccessResponse { Message = "Capacity updated successfully" };
             }
             catch (Exception ex)
@@ -86,6 +89,7 @@ namespace API.Infrastructure.Services
 
                         newDrivers.Add(new Driver
                         {
+                            Id = Guid.NewGuid(),
                             Name = name,
                             VehicleNo = vehicleNo,
                             Contact = contact,
@@ -98,11 +102,12 @@ namespace API.Infrastructure.Services
 
                 if (newDrivers.Count == 0) return Error.Validation(description: "No valid rows found in the file");
 
-                var existing = context.Drivers.ToList();
-                context.Drivers.RemoveRange(existing);
-                await context.Drivers.AddRangeAsync(newDrivers);
+                // Full-replace semantics, matching the previous EF implementation:
+                // wipe the existing fleet list, then insert the uploaded rows.
+                var existing = await Drivers.GetSnapshotAsync();
+                await RunBatchedAsync(existing.Documents.Select(d => d.Reference), (batch, reference) => batch.Delete(reference));
+                await RunBatchedAsync(newDrivers, (batch, driver) => batch.Set(Drivers.Document(driver.Id.ToString()), ToDocument(driver)));
 
-                await context.SaveChangesAsync();
                 return new SuccessResponse { Message = $"Replaced fleet list with {newDrivers.Count} vehicles" };
             }
             catch (Exception ex)
@@ -111,24 +116,37 @@ namespace API.Infrastructure.Services
             }
         }
 
+        // Firestore batched writes cap out at 500 operations — chunk larger
+        // sets so a fleet list bigger than that doesn't silently fail.
+        private async Task RunBatchedAsync<T>(IEnumerable<T> items, Action<WriteBatch, T> apply)
+        {
+            foreach (var chunk in items.Chunk(400))
+            {
+                if (chunk.Length == 0) continue;
+
+                var batch = db.StartBatch();
+                foreach (var item in chunk) apply(batch, item);
+                await batch.CommitAsync();
+            }
+        }
+
         public async Task<ErrorOr<SuccessResponse>> AddDriverAsync(AddDriverDo model)
         {
             try
             {
-                await context.Drivers.AddAsync(new Driver
+                var driver = new Driver
                 {
+                    Id = Guid.NewGuid(),
                     Contact = model.Contact,
                     DateCreated = DateTime.UtcNow,
                     IsActive = true,
                     Name = model.Name,
                     TanksInTruck = model.TanksInTruck,
                     VehicleNo = model.RegNo
-                });
+                };
 
-                var rowsAffected = await context.SaveChangesAsync();
-                if (rowsAffected > 0) return new SuccessResponse { Message = "Driver added successfully" };
-
-                return Error.Failure(description: "Error adding driver");
+                await Drivers.Document(driver.Id.ToString()).SetAsync(ToDocument(driver));
+                return new SuccessResponse { Message = "Driver added successfully" };
             }
             catch (Exception ex)
             {
@@ -140,15 +158,16 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var driver = await context.Drivers.FirstOrDefaultAsync(x => x.VehicleNo == regNo);
+                var snapshot = await Drivers.WhereEqualTo("VehicleNo", regNo).Limit(1).GetSnapshotAsync();
+                var driver = snapshot.Documents.FirstOrDefault();
                 if (driver == null) return Error.NotFound(description: "Driver with this vehicle No. not found");
 
                 return new SearchDriverResponse
                 {
-                    Contact = driver.Contact,
-                    Name = driver.Name,
-                    RegNo = driver.VehicleNo,
-                    TanksInTruck = driver.TanksInTruck
+                    Contact = driver.GetValue<string>("Contact"),
+                    Name = driver.GetValue<string>("Name"),
+                    RegNo = driver.GetValue<string>("VehicleNo"),
+                    TanksInTruck = driver.GetValue<int>("TanksInTruck")
                 };
             }
             catch (Exception ex)
@@ -176,18 +195,18 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                await context.AddDriverRequests.AddAsync(new AddDriverRequest
+                var id = Guid.NewGuid();
+                await DriverRequests.Document(id.ToString()).SetAsync(new Dictionary<string, object>
                 {
-                    Name = model.Name,
-                    VehicleNo = model.RegNo,
-                    Contact = model.Contact,
-                    TanksInTruck = model.TanksInTruck,
-                    IsActive = true,
-                    DateRequested = DateTime.UtcNow,
-                    RequestedById = requestedById
+                    ["Name"] = model.Name,
+                    ["VehicleNo"] = model.RegNo,
+                    ["Contact"] = model.Contact,
+                    ["TanksInTruck"] = model.TanksInTruck,
+                    ["IsActive"] = true,
+                    ["DateRequested"] = DateTime.UtcNow,
+                    ["RequestedById"] = requestedById,
                 });
 
-                await context.SaveChangesAsync();
                 return new SuccessResponse { Message = "Request submitted successfully" };
             }
             catch (Exception ex)
@@ -200,21 +219,37 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var requests = await context.AddDriverRequests
-                    .OrderBy(r => r.DateRequested)
+                var snapshot = await DriverRequests.GetSnapshotAsync();
+                var requests = snapshot.Documents.ToList();
+
+                var requesterIds = requests.Select(r => r.GetValue<string>("RequestedById")).Distinct().ToList();
+                var requesterNames = new Dictionary<string, string>();
+                foreach (var chunk in requesterIds.Chunk(30))
+                {
+                    if (chunk.Length == 0) continue;
+                    var refs = chunk.Select(id => Users.Document(id));
+                    var userSnapshots = await db.GetAllSnapshotsAsync(refs.ToList());
+                    foreach (var userSnapshot in userSnapshots)
+                    {
+                        if (userSnapshot.Exists) requesterNames[userSnapshot.Id] = userSnapshot.GetValue<string?>("Fullname") ?? "";
+                    }
+                }
+
+                var result = requests
                     .Select(r => new DriverRequestDto
                     {
-                        Id = r.Id,
-                        Name = r.Name,
-                        RegNo = r.VehicleNo,
-                        Contact = r.Contact,
-                        TanksInTruck = r.TanksInTruck,
-                        RequestedByName = r.RequestedBy != null ? r.RequestedBy.Fullname : null,
-                        DateRequested = r.DateRequested
+                        Id = Guid.Parse(r.Id),
+                        Name = r.GetValue<string>("Name"),
+                        RegNo = r.GetValue<string>("VehicleNo"),
+                        Contact = r.GetValue<string>("Contact"),
+                        TanksInTruck = r.GetValue<int>("TanksInTruck"),
+                        RequestedByName = requesterNames.GetValueOrDefault(r.GetValue<string>("RequestedById")),
+                        DateRequested = r.GetValue<DateTime>("DateRequested")
                     })
-                    .ToListAsync();
+                    .OrderBy(r => r.DateRequested)
+                    .ToList();
 
-                return requests;
+                return result;
             }
             catch (Exception ex)
             {
@@ -226,21 +261,23 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var request = await context.AddDriverRequests.FindAsync(id);
-                if (request is null) return Error.NotFound(description: "Request not found");
+                var requestRef = DriverRequests.Document(id.ToString());
+                var request = await requestRef.GetSnapshotAsync();
+                if (!request.Exists) return Error.NotFound(description: "Request not found");
 
-                await context.Drivers.AddAsync(new Driver
+                var driver = new Driver
                 {
-                    Name = request.Name,
-                    VehicleNo = request.VehicleNo,
-                    Contact = request.Contact,
-                    TanksInTruck = request.TanksInTruck,
+                    Id = Guid.NewGuid(),
+                    Name = request.GetValue<string>("Name"),
+                    VehicleNo = request.GetValue<string>("VehicleNo"),
+                    Contact = request.GetValue<string>("Contact"),
+                    TanksInTruck = request.GetValue<int>("TanksInTruck"),
                     IsActive = true,
                     DateCreated = DateTime.UtcNow
-                });
+                };
 
-                context.AddDriverRequests.Remove(request);
-                await context.SaveChangesAsync();
+                await Drivers.Document(driver.Id.ToString()).SetAsync(ToDocument(driver));
+                await requestRef.DeleteAsync();
 
                 return new SuccessResponse { Message = "Request approved successfully" };
             }
@@ -254,12 +291,11 @@ namespace API.Infrastructure.Services
         {
             try
             {
-                var request = await context.AddDriverRequests.FindAsync(id);
-                if (request is null) return Error.NotFound(description: "Request not found");
+                var requestRef = DriverRequests.Document(id.ToString());
+                var request = await requestRef.GetSnapshotAsync();
+                if (!request.Exists) return Error.NotFound(description: "Request not found");
 
-                context.AddDriverRequests.Remove(request);
-                await context.SaveChangesAsync();
-
+                await requestRef.DeleteAsync();
                 return new SuccessResponse { Message = "Request rejected" };
             }
             catch (Exception ex)
@@ -267,6 +303,17 @@ namespace API.Infrastructure.Services
                 return Error.Failure(description: ex.Message);
             }
         }
+
+        private static Dictionary<string, object> ToDocument(Driver driver) => new()
+        {
+            ["Name"] = driver.Name,
+            ["VehicleNo"] = driver.VehicleNo,
+            ["Contact"] = driver.Contact,
+            ["TanksInTruck"] = driver.TanksInTruck,
+            ["IsActive"] = driver.IsActive,
+            ["DateCreated"] = driver.DateCreated,
+            ["DateUpdated"] = driver.DateUpdated,
+        };
     }
 
     public class DriverSummaryDto

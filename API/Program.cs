@@ -3,7 +3,6 @@ using API.Infrastructure.Persistence;
 using API.Models;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.EntityFrameworkCore;
 using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -54,11 +53,10 @@ app.UseAuthorization();
 
 app.MapControllers();
 
+// Firestore is schemaless — no migration step needed, just seed the default
+// roles/users (idempotent: IdentitySeeder skips anything that already exists).
 using (var scope = app.Services.CreateScope())
 {
-    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await dbContext.Database.MigrateAsync();
-
     var userManager = scope.ServiceProvider.GetRequiredService<UserManager<AppUser>>();
     var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
 

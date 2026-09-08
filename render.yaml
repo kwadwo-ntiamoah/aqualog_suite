@@ -1,6 +1,7 @@
-# Render Blueprint — deploys the API (from API/Dockerfile) and a
-# self-hosted, dockerized Postgres side by side, wired together over
-# Render's private networking.
+# Render Blueprint — deploys the API (from API/Dockerfile) as a single
+# stateless web service. All persistent data lives in Google Cloud
+# Firestore (external), so there's no disk and no second (paid) database
+# service on Render at all.
 #
 # This is a starting point, not a guaranteed-correct file: Render's
 # Blueprint schema does evolve, and this hasn't been applied against a real
@@ -8,43 +9,21 @@
 # pointing at this repo), check the preview Render shows you before
 # applying, and fix up anything it flags.
 #
-# Manual step required after the first apply: several env vars below are
-# marked `sync: false`, meaning Render won't set a value for them — you set
-# it once in the dashboard. Specifically:
-#   - aqualog-postgres: POSTGRES_PASSWORD -> pick any strong password
-#   - aqualog-api: ConnectionStrings__DbConnection -> use the SAME password:
-#       Host=aqualog-postgres;Port=5432;Database=AquaLogDb;Username=aqualog;Password=<the password you just picked>
-#   - aqualog-api: JWT__Key -> a long random string (never reuse the dev
-#     value committed in API/appsettings.json for production)
-#   - aqualog-api: Cors__AllowedOrigins__0 -> your deployed Vercel URL,
-#     e.g. https://your-app.vercel.app (add more Cors__AllowedOrigins__1,
-#     __2, ... for additional origins, e.g. a custom domain)
-#
-# "aqualog-postgres" is a private service (pserv) — Render doesn't expose it
-# to the internet, only to other services in this same Blueprint, which can
-# reach it at the hostname "aqualog-postgres" on port 5432.
+# Manual step required after the first apply: a few env vars are marked
+# `sync: false`, meaning Render won't set a value for them — you set it
+# once in the dashboard.
+#   - Firestore__ProjectId -> your GCP project ID
+#   - Firestore__CredentialsJson -> the full JSON content of a GCP service
+#     account key with Firestore access (Cloud Console -> IAM & Admin ->
+#     Service Accounts -> your account -> Keys -> Add Key -> JSON), pasted
+#     as one value
+#   - JWT__Key -> a long random string (never reuse the dev value committed
+#     in API/appsettings.json for production)
+#   - Cors__AllowedOrigins__0 -> your deployed Vercel URL, e.g.
+#     https://your-app.vercel.app (add more Cors__AllowedOrigins__1, __2,
+#     ... for additional origins, e.g. a custom domain)
 
 services:
-  - type: pserv
-    name: aqualog-postgres
-    runtime: image
-    image:
-      url: docker.io/library/postgres:16-alpine
-    plan: starter
-    disk:
-      name: aqualog-postgres-data
-      mountPath: /var/lib/postgresql/data
-      sizeGB: 1
-    envVars:
-      - key: POSTGRES_USER
-        value: aqualog
-      - key: POSTGRES_DB
-        value: AquaLogDb
-      - key: PGDATA
-        value: /var/lib/postgresql/data/pgdata
-      - key: POSTGRES_PASSWORD
-        sync: false
-
   - type: web
     name: aqualog-api
     runtime: docker
@@ -53,7 +32,9 @@ services:
     plan: starter
     healthCheckPath: /api/health
     envVars:
-      - key: ConnectionStrings__DbConnection
+      - key: Firestore__ProjectId
+        sync: false
+      - key: Firestore__CredentialsJson
         sync: false
       - key: JWT__Key
         sync: false

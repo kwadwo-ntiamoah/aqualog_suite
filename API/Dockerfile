@@ -16,6 +16,9 @@ WORKDIR /app
 
 COPY --from=build /app/publish .
 
+# All persistent state lives in Firestore (external), so this container
+# itself is stateless — no volume/disk needed.
+
 # The base image ships a built-in non-root "app" user for exactly this.
 USER app
 
