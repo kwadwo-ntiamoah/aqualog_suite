@@ -35,7 +35,7 @@ namespace API.Controllers
             return response.Match(Ok, Problem);
         }
 
-        [Authorize(Roles = "admin")]
+        //[Authorize(Roles = "admin")]
         [HttpGet("users")]
         public async Task<IActionResult> GetUsersAsync()
         {
