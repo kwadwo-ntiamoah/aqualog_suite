@@ -17,16 +17,16 @@ builder.Services.RegisterStartup(builder.Configuration);
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+// Scalar docs are available in every environment (including the deployed
+// Render instance), not just Development — this is a small internal API,
+// not a public product, so exposing the endpoint shapes isn't a concern.
+app.MapOpenApi();
+app.MapScalarApiReference(options =>
 {
-    app.MapOpenApi();
-    app.MapScalarApiReference(options =>
-    {
-        options
-            .WithTitle("AquaLog API")
-            .WithTheme(ScalarTheme.Moon);
-    });
-}
+    options
+        .WithTitle("AquaLog API")
+        .WithTheme(ScalarTheme.Moon);
+});
 
 // Render (and most PaaS hosts) terminate TLS at their edge and forward
 // plain HTTP to the container, tagging the original scheme via
