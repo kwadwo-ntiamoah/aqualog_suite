@@ -19,6 +19,12 @@ namespace API.Infrastructure.Persistence
         {
             var projectId = config.GetValue<string>("Firestore:ProjectId");
             var credentialsJson = config.GetValue<string>("Firestore:CredentialsJson");
+            // A GCP project can hold multiple named Firestore databases —
+            // the client defaults to looking for one literally named
+            // "(default)", which only matches if that's what you named it
+            // when creating it in the console. Override via Firestore:DatabaseId
+            // if yours has a different name.
+            var databaseId = config.GetValue<string>("Firestore:DatabaseId") ?? "(default)";
 
             if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(credentialsJson))
             {
@@ -28,6 +34,7 @@ namespace API.Infrastructure.Persistence
             return new FirestoreDbBuilder
             {
                 ProjectId = projectId,
+                DatabaseId = databaseId,
                 JsonCredentials = credentialsJson,
             }.Build();
         }

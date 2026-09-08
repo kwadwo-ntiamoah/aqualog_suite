@@ -17,6 +17,9 @@
 #     account key with Firestore access (Cloud Console -> IAM & Admin ->
 #     Service Accounts -> your account -> Keys -> Add Key -> JSON), pasted
 #     as one value
+#   - Firestore__DatabaseId -> only needed if your Firestore database isn't
+#     named the default "(default)" — check Firestore -> Databases in the
+#     console for its actual Database ID and set this to match if different
 #   - JWT__Key -> a long random string (never reuse the dev value committed
 #     in API/appsettings.json for production)
 #   - Cors__AllowedOrigins__0 -> your deployed Vercel URL, e.g.
