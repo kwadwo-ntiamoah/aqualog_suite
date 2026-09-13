@@ -7,6 +7,9 @@ namespace API.Infrastructure.Services
     public class AnalyticsService(FirestoreDb db)
     {
         private CollectionReference Transactions => db.Collection("transactions");
+        private CollectionReference Shops => db.Collection("shops");
+        private CollectionReference Balances => db.Collection("electricityBalances");
+        private CollectionReference Users => db.Collection("users");
 
         public async Task<ErrorOr<AnalyticsOverviewDto>> GetOverviewAsync()
         {
@@ -51,18 +54,65 @@ namespace API.Infrastructure.Services
                     .Take(5)
                     .ToList();
 
+                var electricityBalances = await GetElectricityStatusByShopAsync();
+
                 return new AnalyticsOverviewDto
                 {
                     RevenueLast7Days = revenueByDay,
                     CashPercentage = cashPct,
                     MomoPercentage = momoPct,
-                    TopVehicles = topVehicles
+                    TopVehicles = topVehicles,
+                    ElectricityBalances = electricityBalances
                 };
             }
             catch (Exception ex)
             {
                 return Error.Failure(description: ex.Message);
             }
+        }
+
+        // Current electricity balance per shop, each with who last recorded it
+        // and when — one query per shop (not batched, since Firestore has no
+        // native "latest per group" query), fine at this app's shop count.
+        private async Task<List<ShopElectricityStatusDto>> GetElectricityStatusByShopAsync()
+        {
+            var shopsSnapshot = await Shops.WhereEqualTo("IsActive", true).GetSnapshotAsync();
+            var result = new List<ShopElectricityStatusDto>();
+
+            foreach (var shop in shopsSnapshot.Documents)
+            {
+                var shopId = shop.Id;
+                var shopName = shop.GetValue<string>("DisplayName");
+
+                var balanceSnapshot = await Balances
+                    .WhereEqualTo("ShopId", shopId)
+                    .OrderByDescending("DateRecorded")
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                var latest = balanceSnapshot.Documents.FirstOrDefault();
+                if (latest is null)
+                {
+                    result.Add(new ShopElectricityStatusDto { ShopId = Guid.Parse(shopId), ShopName = shopName, HasRecord = false });
+                    continue;
+                }
+
+                var userId = latest.GetValue<string>("UserId");
+                var userSnapshot = await Users.Document(userId).GetSnapshotAsync();
+                var recordedByName = userSnapshot.Exists ? userSnapshot.GetValue<string?>("Fullname") : null;
+
+                result.Add(new ShopElectricityStatusDto
+                {
+                    ShopId = Guid.Parse(shopId),
+                    ShopName = shopName,
+                    HasRecord = true,
+                    Balance = latest.GetValue<int>("Balance"),
+                    DateRecorded = latest.GetValue<DateTime>("DateRecorded"),
+                    RecordedByName = recordedByName
+                });
+            }
+
+            return result.OrderBy(s => s.ShopName).ToList();
         }
     }
 
@@ -79,6 +129,30 @@ namespace API.Infrastructure.Services
 
         [JsonProperty("topVehicles")]
         public List<TopVehicleDto> TopVehicles { get; set; } = [];
+
+        [JsonProperty("electricityBalances")]
+        public List<ShopElectricityStatusDto> ElectricityBalances { get; set; } = [];
+    }
+
+    public class ShopElectricityStatusDto
+    {
+        [JsonProperty("shopId")]
+        public Guid ShopId { get; set; }
+
+        [JsonProperty("shopName")]
+        public string ShopName { get; set; } = null!;
+
+        [JsonProperty("hasRecord")]
+        public bool HasRecord { get; set; }
+
+        [JsonProperty("balance")]
+        public int Balance { get; set; }
+
+        [JsonProperty("dateRecorded")]
+        public DateTime? DateRecorded { get; set; }
+
+        [JsonProperty("recordedByName")]
+        public string? RecordedByName { get; set; }
     }
 
     public class DailyRevenueDto

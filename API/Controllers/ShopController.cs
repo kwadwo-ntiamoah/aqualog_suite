@@ -1,5 +1,6 @@
 
 using API.Infrastructure.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 
@@ -41,6 +42,14 @@ namespace API.Controllers
         public async Task<IActionResult> GetLatestBalanceAsync(Guid id)
         {
             var response = await shopService.GetLatestBalanceAsync(id);
+            return response.Match(Ok, Problem);
+        }
+
+        [Authorize(Roles = "admin")]
+        [HttpGet("{id}/balances")]
+        public async Task<IActionResult> GetBalanceHistoryAsync(Guid id)
+        {
+            var response = await shopService.GetBalanceHistoryAsync(id);
             return response.Match(Ok, Problem);
         }
 

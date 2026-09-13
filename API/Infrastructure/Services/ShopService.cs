@@ -109,6 +109,46 @@ namespace API.Infrastructure.Services
             }
         }
 
+        public async Task<ErrorOr<List<ElectricityBalanceHistoryDto>>> GetBalanceHistoryAsync(Guid shopId)
+        {
+            try
+            {
+                var snapshot = await Balances
+                    .WhereEqualTo("ShopId", shopId.ToString())
+                    .OrderByDescending("DateRecorded")
+                    .GetSnapshotAsync();
+
+                var records = snapshot.Documents.ToList();
+                var userIds = records.Select(r => r.GetValue<string>("UserId")).Distinct().ToList();
+                var userNames = new Dictionary<string, string>();
+
+                foreach (var chunk in userIds.Chunk(30))
+                {
+                    if (chunk.Length == 0) continue;
+                    var refs = chunk.Select(id => Users.Document(id)).ToList();
+                    var userSnapshots = await db.GetAllSnapshotsAsync(refs);
+                    foreach (var userSnapshot in userSnapshots)
+                    {
+                        if (userSnapshot.Exists) userNames[userSnapshot.Id] = userSnapshot.GetValue<string?>("Fullname") ?? "";
+                    }
+                }
+
+                return records
+                    .Select(r => new ElectricityBalanceHistoryDto
+                    {
+                        Id = Guid.Parse(r.Id),
+                        Balance = r.GetValue<int>("Balance"),
+                        DateRecorded = r.GetValue<DateTime>("DateRecorded"),
+                        RecordedByName = userNames.GetValueOrDefault(r.GetValue<string>("UserId"), "Unknown")
+                    })
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                return Error.Failure(description: ex.Message);
+            }
+        }
+
         public async Task<ErrorOr<ShopSummaryStatsDto>> GetShopSummaryAsync(Guid shopId)
         {
             try
@@ -150,6 +190,21 @@ namespace API.Infrastructure.Services
 
         [JsonProperty("recordedByName")]
         public string? RecordedByName { get; set; }
+    }
+
+    public class ElectricityBalanceHistoryDto
+    {
+        [JsonProperty("id")]
+        public Guid Id { get; set; }
+
+        [JsonProperty("balance")]
+        public int Balance { get; set; }
+
+        [JsonProperty("dateRecorded")]
+        public DateTime DateRecorded { get; set; }
+
+        [JsonProperty("recordedByName")]
+        public string RecordedByName { get; set; } = null!;
     }
 
     public class ShopSummaryStatsDto
