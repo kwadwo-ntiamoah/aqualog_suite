@@ -20,6 +20,7 @@ namespace API.Infrastructure.Identity
         IUserSecurityStampStore<AppUser>
     {
         private CollectionReference Users => db.Collection("users");
+        private CollectionReference Roles => db.Collection("roles");
 
         public void Dispose() { }
 
@@ -98,7 +99,19 @@ namespace API.Infrastructure.Identity
             return Task.CompletedTask;
         }
 
-        public Task<IList<string>> GetRolesAsync(AppUser user, CancellationToken ct) => Task.FromResult<IList<string>>(user.Roles);
+        // user.Roles stores the NORMALIZED name (what UserManager passes into
+        // AddToRoleAsync — see the class comment). [Authorize(Roles = "admin")]
+        // does a case-sensitive match against the real display name, so this
+        // must translate "ADMIN" back to "admin" via the roles collection
+        // before it becomes the JWT role claim — returning the normalized
+        // form here silently 403s every admin-only endpoint.
+        public async Task<IList<string>> GetRolesAsync(AppUser user, CancellationToken ct)
+        {
+            if (user.Roles.Count == 0) return [];
+
+            var query = await Roles.WhereIn("NormalizedName", user.Roles).GetSnapshotAsync(ct);
+            return query.Documents.Select(d => d.GetValue<string>("Name")).ToList();
+        }
         public Task<bool> IsInRoleAsync(AppUser user, string normalizedRoleName, CancellationToken ct) =>
             Task.FromResult(user.Roles.Contains(normalizedRoleName));
 

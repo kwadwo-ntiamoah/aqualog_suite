@@ -11,7 +11,8 @@ namespace API.Models
         public int TanksInTruck { get; set; }
         public bool IsActive { get; set; }
         public DateTime DateRequested { get; set; } = DateTime.UtcNow;
-        public DateTime DateUpdated { get; set; }
+        // See Driver.DateUpdated — same Firestore Kind=Utc requirement.
+        public DateTime DateUpdated { get; set; } = DateTime.UtcNow;
         public string RequestedById {get; set;} = null!;
     }
 }

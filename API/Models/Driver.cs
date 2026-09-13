@@ -14,6 +14,9 @@ namespace API.Models
         public int TanksInTruck { get; set; }
         public bool IsActive { get; set; }
         public DateTime DateCreated { get; set; } = DateTime.UtcNow;
-        public DateTime DateUpdated { get; set; }
+        // Firestore's SDK refuses to convert a DateTime to a Timestamp unless
+        // its Kind is explicitly Utc — the default(DateTime) this would
+        // otherwise fall back to is Kind=Unspecified, which throws.
+        public DateTime DateUpdated { get; set; } = DateTime.UtcNow;
     }
 }
